@@ -201,6 +201,11 @@ class LLaMAAttention(nn.Module):
         )
         self.rotary_emb = RotaryEmbedding(self.head_dim)
 
+        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        if not self.flash:
+            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+            self.register_buffer("bias", torch.tril(torch.ones(hidden_size, hidden_size)).view(1, 1, hidden_size, hidden_size))
+
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
@@ -233,27 +238,30 @@ class LLaMAAttention(nn.Module):
             key_states = torch.cat([past_key_value[0], key_states], dim=2)
             value_states = torch.cat([past_key_value[1], value_states], dim=2)
 
-        past_key_value = (key_states, value_states)
+        if self.flash:
+            attn_output = torch.nn.functional.scaled_dot_product_attention(query_states, key_states, value_states, attn_mask=attention_mask)
+        else:
+            past_key_value = (key_states, value_states)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+            attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
-        if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
-            raise ValueError(
-                f"Attention weights should be of size {(bsz * self.num_heads, q_len, kv_seq_len)}, but is"
-                f" {attn_weights.size()}"
-            )
-
-        if attention_mask is not None:
-            if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+            if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
                 raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                    f"Attention weights should be of size {(bsz * self.num_heads, q_len, kv_seq_len)}, but is"
+                    f" {attn_weights.size()}"
                 )
-            attn_weights = attn_weights + attention_mask
-            attn_weights = torch.max(attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min))
 
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_output = torch.matmul(attn_weights, value_states)
+            if attention_mask is not None:
+                if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
+                    raise ValueError(
+                        f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
+                    )
+                attn_weights = attn_weights + attention_mask
+                attn_weights = torch.max(attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min))
+
+            # upcast attention to fp32
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+            attn_output = torch.matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
