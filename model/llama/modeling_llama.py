@@ -39,8 +39,20 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
+
 from .configuration_llama import LLaMAConfig
 
+try:
+    from flash_attn import flash_attn_func
+    _FLASH_ATTEN_2 = True
+    print("Using flash attention 2")
+except ImportError:
+    print("Flash Attention 2 could not be imported, reverted to pytorch flash atten")
+    _FLASH_ATTEN_2 = False
+
+_FLASH_ATTEN_1 = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+if not _FLASH_ATTEN_1:
+    print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
 
 logger = logging.get_logger(__name__)
 
@@ -200,12 +212,7 @@ class LLaMAAttention(nn.Module):
             bias=False,
         )
         self.rotary_emb = RotaryEmbedding(self.head_dim)
-
-        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-        if not self.flash:
-            print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
-            self.register_buffer("bias", torch.tril(torch.ones(hidden_size, hidden_size)).view(1, 1, hidden_size, hidden_size))
-
+    
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
@@ -238,7 +245,9 @@ class LLaMAAttention(nn.Module):
             key_states = torch.cat([past_key_value[0], key_states], dim=2)
             value_states = torch.cat([past_key_value[1], value_states], dim=2)
 
-        if self.flash:
+        if _FLASH_ATTEN_2:
+            attn_output = flash_attn_func(query_states, key_states, value_states, causal=True)
+        elif _FLASH_ATTEN_1:
             attn_output = torch.nn.functional.scaled_dot_product_attention(query_states, key_states, value_states, attn_mask=attention_mask)
         else:
             past_key_value = (key_states, value_states)
