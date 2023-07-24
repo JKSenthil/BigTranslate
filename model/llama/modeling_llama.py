@@ -44,7 +44,7 @@ from .configuration_llama import LLaMAConfig
 
 try:
     from flash_attn import flash_attn_func
-    _FLASH_ATTEN_2 = True
+    _FLASH_ATTEN_2 = False
     print("Using flash attention 2")
 except ImportError:
     print("Flash Attention 2 could not be imported, reverted to pytorch flash atten")
@@ -246,7 +246,7 @@ class LLaMAAttention(nn.Module):
             value_states = torch.cat([past_key_value[1], value_states], dim=2)
 
         if _FLASH_ATTEN_2:
-            attn_output = flash_attn_func(query_states, key_states, value_states, causal=True)
+            attn_output = flash_attn_func(query_states.half(), key_states.half(), value_states.half(), causal=True)
         elif _FLASH_ATTEN_1:
             attn_output = torch.nn.functional.scaled_dot_product_attention(query_states, key_states, value_states, attn_mask=attention_mask)
         else:
